@@ -76,7 +76,6 @@ class Attention(nn.Module):
         value = self.value_layer(x) 
 
         att_scores = (query @ key.transpose(-2, -1)) * (1.0 / math.sqrt(self.d_head))
-
        
         if masked is None:
             masked = self.masked_default
@@ -142,28 +141,62 @@ class EncoderLayer(nn.Module):
 
         return x
 
-class DecoderLayer(nn.Module):
-    def __init__(self, d_model : int, num_heads : int ,d_hidden : int, dropout : float, masked : bool = True):
+class CrossAttention(nn.Module):
+    def __init__(self,d_model : int, d_head : int, dropout : float):
         super().__init__()
-        
-        self.att_layer = MHA(d_model = d_model, num_heads = num_heads, dropout = dropout, masked = masked)
-        self.feed_forward_layer = FFNN(d_model = d_model, d_hidden=  d_hidden,dropout = dropout)
+        self.d_head = d_head 
+        self.query = nn.Linear(d_model,d_head, bias = True )
+        self.key = nn.Linear(d_model,d_head,bias = True)
+        self.value = nn.Linear(d_model,d_head,bias = True)
         self.drop = nn.Dropout(dropout)
-        self.LayerNorm_att = nn.LayerNorm(d_model)
+
+    
+    def forward(self, x : torch.Tensor, context : torch.Tensor):
+        Q = self.query(x)
+        K = self.key(context)
+        V = self.value(context)
+
+        att_score = (Q @ K.transpose(-2,1)) * (1.0/math.sqrt(self.d_head))
+        att_weight = F.softmax(att_score,dim =-1)
+        att_weight = self.drop(att_weight)
+        out = att_weight @ V  
+        return out 
+
+class CrossMHA(nn.Module):
+    def __init__(self,d_model : int , num_heads : int, dropout : float):
+        super().__init__()
+        assert d_model % num_heads == 0, f"d_model {d_model} must be divisible by num_heads {num_heads}"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = self.d_model//self.num_heads
+
+        self.heads = nn.ModuleList([CrossAttention(self.d_model, self.d_head,dropout) for _ in range(num_heads)])
+        self.output_projection = nn.Linear(self.num_heads*self.d_head,self.d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x : torch.Tensor, context : torch.Tensor):
+        outs = [h(x,context)for h in self.heads]
+        y = torch.cat(outs,dim = -1)
+        y = self.output_projection(y)
+        y = self.drop(y)
+        return y 
+    
+
+class DecoderLayer(nn.Module):
+    def __init__(self,d_model, num_heads, d_hidden, dropout):
+        super().__init__()
+        self.LayerNorm_att1 = nn.LayerNorm(d_model)
         self.LayerNorm_att2 = nn.LayerNorm(d_model)
         self.LayerNorm_ffnn = nn.LayerNorm(d_model)
+        self.att_layer =  MHA(d_model = d_model, num_heads = num_heads, dropout = dropout, masked = True)
+        self.crossatt_layer = CrossMHA(d_model,num_heads,dropout)
+        self.ffnn = FFNN(d_model,d_hidden,dropout)
+        self.drop = nn.Dropout(dropout)
 
-    def forward(self,embed_input : torch.Tensor ,masked : bool  = True):
+    def forward(self,embed_input : torch.Tensor, encoder_out : torch.Tensor):
+        x = embed_input + self.drop(self.att_layer(self.LayerNorm_att1(embed_input),masked = True))
+        x = x + self.drop(self.crossatt_layer(self.LayerNorm_att2(x),encoder_out))
+        x = x + self.drop(self.ffnn(self.LayerNorm_ffnn(x)))
 
-        att_sublayer = self.att_layer(self.LayerNorm_att(embed_input), masked = masked  )
-        x = embed_input + self.dropout(att_sublayer)
-
-        att_sublayer2 = self.att_layer(self.LayerNorm_att2(embed_input), masked = False  )
-        x = x + self.dropout(att_sublayer2)
-
-        ffnn_sublayer = self.feed_forward_layer(self.LayerNorm_ffnn(x)) 
-        x = x +  self.dropout(ffnn_sublayer)
-        
         return x 
-
 
