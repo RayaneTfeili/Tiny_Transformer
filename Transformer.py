@@ -200,3 +200,102 @@ class DecoderLayer(nn.Module):
 
         return x 
 
+
+class TransformerEncoderDecoder(nn.Module):
+
+    def __init__(self, num_layer,d_model, d_hidden,num_heads, drop=0.1,bias=True):
+        super().__init__()
+        self.num_layer = num_layer
+        self.d_model = d_model
+        self.d_hidden = d_hidden 
+        self.num_head = num_heads
+        self.drop = drop
+        self.bias = bias
+        
+        # Encoder stack
+        self.encoder_stack = nn.ModuleList([ EncoderLayer(
+                                        d_model = self.d_model, 
+                                        d_hidden = self.d_hidden,
+                                        num_head = self.num_heads, 
+                                        drop = self.drop,
+                                        bias = self.bias) for _ in range(self.num_layer)])
+
+        # Decoder stack
+        self.decoder_stack = nn.ModuleList([ DecoderLayer(
+                                        d_model = self.d_model, 
+                                        d_hidden = self.d_hidden,
+                                        num_head = self.num_heads, 
+                                        drop = self.drop,
+                                        bias = self.bias) for _ in range(self.num_layer)])
+
+    
+    def forward(self, embed_encoder_input, embed_decoder_input):
+        # Process through all encoder layers first
+        encoder_output = embed_encoder_input
+        for encoder in self.encoder_stack:
+            encoder_output = encoder(encoder_output)
+        
+        # Use final encoder output for all decoder layers
+        decoder_output = embed_decoder_input
+        for decoder in self.decoder_stack:
+            decoder_output = decoder(decoder_output, encoder_output)
+        
+        return decoder_output
+####
+#Since I have only a GTX 1650, I'll not use TransformerEncoderDecoder Class 
+#but rather use the decoder class 
+class TransformerModel(nn.Module):
+    def __init__(self,d_model, num_layer,num_blocks, d_hidden,num_heads,max_token_value,context_length,vocab_size, drop=0.1,bias=True):
+        super().__init__()
+        self.num_layer = num_layer 
+        self.d_model = d_model 
+        self.num_heads = num_heads 
+        self.num_blocks = num_blocks
+        self.d_hidden = d_hidden 
+        self.max_token_value = max_token_value 
+        self.vocab_size = vocab_size
+        self.context_lenght = context_length 
+
+
+        self.drop = drop
+
+        self.token_embedding = Embedding(num_embeddings = self.max_token_value + 1 , embedding_dim = self.d_model)
+
+        self.transformer_blocks = nn.Sequential([TransformerEncoderDecoder(num_layer = self.num_layer,d_model=self.d_model, d_hidden=self.d_hidden,num_heads= self.num_heads, drop=0.1,bias=True) for _ in range(self.num_blocks)])
+
+
+        self.linear_classifier_layer = nn.Linear(in_features=self.d_model, out_features=self.max_token_value)
+
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+      
+        x = self.token_embedding + PositionalEncoding(self.context_lenght, embedding_dim = self.d_model )
+        x = self.transformer_blocks(x)
+        logits = self.linear_classifier_layer(x)
+
+        if targets is not None:
+            B, T, C = logits.shape
+            logits_reshaped = logits.view(B * T, C)
+            targets_reshaped = targets.view(B * T)
+            loss = F.cross_entropy(input=logits_reshaped, target=targets_reshaped)
+        else:
+            loss = None
+        return logits, loss
+
+    def generate(self, idx, max_new_tokens):
+        # idx is (B,T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # Crop idx to the max size of our positional embeddings table
+            idx_crop = idx[:, -self.context_length:]
+            # Get predictions
+            logits, loss = self(idx_crop)
+            # Get the last time step from logits where the dimensions of the logits are (B,T,C)
+            logits_last_timestep = logits[:, -1, :]
+            # Apply softmax to get probabilities
+            probs = F.softmax(input=logits_last_timestep, dim=-1)
+            # Sample from the probabilities' distribution.
+            idx_next = torch.multinomial(input=probs, num_samples=1)
+            # Append the sampled indexes idx_next to idx
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx
