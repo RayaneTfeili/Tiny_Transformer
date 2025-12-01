@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math 
-import torch.functional as F 
+import torch.nn.functional as F 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class Embedding(nn.Module):
@@ -19,7 +19,7 @@ class PositionalEncoding(nn.Module):
         self.seq_len = seq_len 
         self.emb_dim = emb_dim 
         self.batch_size = batch_size
-        pos_enc = torch.zero(self.seq_len,self.emb_dim)
+        pos_enc = torch.zeros(self.seq_len,self.emb_dim)
         for pos in range(self.seq_len):
             for i in range(0,self.emb_dim):
                 pos_enc[pos,2*i] = math.sin(pos/10000**(2*i/self.emb_dim))
@@ -28,7 +28,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pos_enc)
 
     def forward(self, input):
-        x= input * math.sqrt(self.embed_dim)
+        x= input * math.sqrt(self.emb_dim)
         seq_len = x.size(1)
         pe = self.pe[:, :seq_len]
         x = x + pe
@@ -82,9 +82,7 @@ class Attention(nn.Module):
         if masked:
             
             causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-                diagonal=1
-            )
+                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),diagonal=1)
            
             att_scores = att_scores.masked_fill(causal_mask, float("-inf"))
 
@@ -116,7 +114,7 @@ class MHA(nn.Module):
         head_outputs = [h(x,masked = masked ) for h in self.heads]
         output = torch.cat(head_outputs, dim=-1)
         output = self.output_projection(output)  
-        output = self.dropout_layer(output)
+        output = self.drop(output)
         return output
     
 
@@ -132,11 +130,11 @@ class EncoderLayer(nn.Module):
 
     def forward(self,embed_input : torch.Tensor ,masked : bool  = None):
         att_sublayer = self.att_layer(self.LayerNorm_att(embed_input), masked = masked  )
-        x = embed_input + self.dropout(att_sublayer)
+        x = embed_input + self.drop(att_sublayer)
 
 
         ffnn_sublayer = self.feed_forward_layer(self.LayerNorm_ffnn(x)) 
-        x = x +  self.dropout(ffnn_sublayer)
+        x = x +  self.drop(ffnn_sublayer)
         
 
         return x
@@ -156,7 +154,7 @@ class CrossAttention(nn.Module):
         K = self.key(context)
         V = self.value(context)
 
-        att_score = (Q @ K.transpose(-2,1)) * (1.0/math.sqrt(self.d_head))
+        att_score = (Q @ K.transpose(-2,-1)) * (1.0/math.sqrt(self.d_head))
         att_weight = F.softmax(att_score,dim =-1)
         att_weight = self.drop(att_weight)
         out = att_weight @ V  
@@ -186,16 +184,16 @@ class DecoderLayer(nn.Module):
     def __init__(self,d_model, num_heads, d_hidden, dropout):
         super().__init__()
         self.LayerNorm_att1 = nn.LayerNorm(d_model)
-        self.LayerNorm_att2 = nn.LayerNorm(d_model)
+        #self.LayerNorm_att2 = nn.LayerNorm(d_model)  uncomment if you use the encoder part 
         self.LayerNorm_ffnn = nn.LayerNorm(d_model)
         self.att_layer =  MHA(d_model = d_model, num_heads = num_heads, dropout = dropout, masked = True)
-        self.crossatt_layer = CrossMHA(d_model,num_heads,dropout)
+        #self.crossatt_layer = CrossMHA(d_model,num_heads,dropout)  uncoment if you use the encoder part 
         self.ffnn = FFNN(d_model,d_hidden,dropout)
         self.drop = nn.Dropout(dropout)
-
-    def forward(self,embed_input : torch.Tensor, encoder_out : torch.Tensor):
+    #add encoder_out : torch.Tensor if you want to use the encoder part  
+    def forward(self,embed_input : torch.Tensor):
         x = embed_input + self.drop(self.att_layer(self.LayerNorm_att1(embed_input),masked = True))
-        x = x + self.drop(self.crossatt_layer(self.LayerNorm_att2(x),encoder_out))
+        #x = x + self.drop(self.crossatt_layer(self.LayerNorm_att2(x),encoder_out)) uncoment if you use the encoder part
         x = x + self.drop(self.ffnn(self.LayerNorm_ffnn(x)))
 
         return x 
@@ -208,25 +206,15 @@ class TransformerEncoderDecoder(nn.Module):
         self.num_layer = num_layer
         self.d_model = d_model
         self.d_hidden = d_hidden 
-        self.num_head = num_heads
+        self.num_heads = num_heads
         self.drop = drop
         self.bias = bias
         
-        # Encoder stack
-        self.encoder_stack = nn.ModuleList([ EncoderLayer(
-                                        d_model = self.d_model, 
-                                        d_hidden = self.d_hidden,
-                                        num_head = self.num_heads, 
-                                        drop = self.drop,
-                                        bias = self.bias) for _ in range(self.num_layer)])
+        #Encoder stack 
+        self.encoder_stack = nn.ModuleList([EncoderLayer(d_model = self.d_model, d_hidden = self.d_hidden,num_head = self.num_heads, drop = self.drop,bias = self.bias) for _ in range(self.num_layer)])
 
-        # Decoder stack
-        self.decoder_stack = nn.ModuleList([ DecoderLayer(
-                                        d_model = self.d_model, 
-                                        d_hidden = self.d_hidden,
-                                        num_head = self.num_heads, 
-                                        drop = self.drop,
-                                        bias = self.bias) for _ in range(self.num_layer)])
+        #Decoder stack
+        self.decoder_stack = nn.ModuleList([DecoderLayer(d_model = self.d_model,d_hidden = self.d_hidden,num_head = self.num_heads, drop = self.drop,bias = self.bias) for _ in range(self.num_layer)])
 
     
     def forward(self, embed_encoder_input, embed_decoder_input):
@@ -244,6 +232,8 @@ class TransformerEncoderDecoder(nn.Module):
 ####
 #Since I have only a GTX 1650, I'll not use TransformerEncoderDecoder Class 
 #but rather use the decoder class 
+#If you want to use the full architecture use 
+#TransformerEncoderDecoder class in self.transform_blocks 
 class TransformerModel(nn.Module):
     def __init__(self,d_model, num_layer,num_blocks, d_hidden,num_heads,max_token_value,context_length,vocab_size, drop=0.1,bias=True):
         super().__init__()
@@ -260,8 +250,8 @@ class TransformerModel(nn.Module):
         self.drop = drop
 
         self.token_embedding = Embedding(num_embeddings = self.max_token_value + 1 , embedding_dim = self.d_model)
-
-        self.transformer_blocks = nn.Sequential([TransformerEncoderDecoder(num_layer = self.num_layer,d_model=self.d_model, d_hidden=self.d_hidden,num_heads= self.num_heads, drop=0.1,bias=True) for _ in range(self.num_blocks)])
+        self.positional_encoding = PositionalEncoding(seq_len = self.context_length,emb_dim = self.d_model )
+        self.transformer_blocks = nn.Sequential(*([DecoderLayer(num_layer = self.num_layer,d_model=self.d_model, d_hidden=self.d_hidden,num_heads= self.num_heads, drop=0.1,bias=True) for _ in range(self.num_blocks)]))
 
 
         self.linear_classifier_layer = nn.Linear(in_features=self.d_model, out_features=self.max_token_value)
@@ -270,15 +260,14 @@ class TransformerModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
       
-        x = self.token_embedding + PositionalEncoding(self.context_lenght, embedding_dim = self.d_model )
+        x = self.token_embedding(idx)
+        x = self.positional_encoding(x)
         x = self.transformer_blocks(x)
         logits = self.linear_classifier_layer(x)
 
         if targets is not None:
             B, T, C = logits.shape
-            logits_reshaped = logits.view(B * T, C)
-            targets_reshaped = targets.view(B * T)
-            loss = F.cross_entropy(input=logits_reshaped, target=targets_reshaped)
+            loss = F.cross_entropy(input=logits.view(B * T, C), target=targets.view(B * T))
         else:
             loss = None
         return logits, loss
@@ -287,8 +276,7 @@ class TransformerModel(nn.Module):
         for _ in range(max_new_tokens):
             idx_crop = idx[:, -self.context_length:]
             logits, loss = self(idx_crop)
-            logits_last_timestep = logits[:, -1, :]
-            probs = F.softmax(input=logits_last_timestep, dim=-1)
+            probs = F.softmax(input=logits[:, -1, :], dim=-1)
             idx_next = torch.multinomial(input=probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx = torch.cat([idx, idx_next], dim=1)
         return idx
