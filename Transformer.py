@@ -14,24 +14,20 @@ class Embedding(nn.Module):
         return self.embedding(input)
 
 class PositionalEncoding(nn.Module):
-    def __init__(self,seq_len, emb_dim,batch_size=1 ):
+    def __init__(self, seq_len, emb_dim):
         super().__init__()
         self.seq_len = seq_len 
         self.emb_dim = emb_dim 
-        self.batch_size = batch_size
-        pos_enc = torch.zeros(self.seq_len,self.emb_dim)
-        for pos in range(self.seq_len):
-            for i in range(0,self.emb_dim):
-                pos_enc[pos,2*i] = math.sin(pos/10000**(2*i/self.emb_dim))
-                pos_enc[pos,2*i+1] = math.cos(pos/10000**(2*i/self.emb_dim))
-        pos_enc = pos_enc.unsqueeze(0)
-        self.register_buffer("pe", pos_enc)
+        pe = torch.zeros(self.seq_len, self.emb_dim)
+        position = torch.arange(0, self.seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.emb_dim, 2).float()* (-math.log(10000.0) / self.emb_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, input):
-        seq_len = input.size(1)
-        pe = self.pe[:, :seq_len]
-        
-        return input + pe 
+        S = input.size(1)
+        return input + self.pe[:, :S]
 
 class FFNN(nn.Module):
     def __init__(self,d_model,d_hidden,dropout):
@@ -250,6 +246,8 @@ class TransformerModel(nn.Module):
 
         self.LN = nn.LayerNorm(self.d_model)
         self.linear_classifier_layer = nn.Linear(in_features=self.d_model, out_features=self.vocab_size)
+        self.linear_classifier_layer.weight = self.token_embedding.embedding.weight
+
 
 
     def forward(self, idx, targets=None):
@@ -268,7 +266,7 @@ class TransformerModel(nn.Module):
                                    targets.view(-1))
 
         return logits, loss
-
+    @torch.no_grad()
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
             idx_crop = idx[:, -self.context_length:]
@@ -278,7 +276,6 @@ class TransformerModel(nn.Module):
             idx = torch.cat([idx, idx_next], dim=1)
         return idx
     
-
 
 
 
