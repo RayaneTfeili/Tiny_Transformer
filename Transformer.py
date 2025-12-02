@@ -9,7 +9,7 @@ class Embedding(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size 
         self.emb_dim = emb_dim 
-        self.embedding = nn.Embedding(num_embeddings=self.vocab_size, embedding_dim=self.emb_dim)
+        self.embedding = nn.Embedding(self.vocab_size, self.emb_dim)
     def forward(self,input):
         return self.embedding(input)
 
@@ -28,11 +28,10 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pos_enc)
 
     def forward(self, input):
-        x= input * math.sqrt(self.emb_dim)
-        seq_len = x.size(1)
+        seq_len = input.size(1)
         pe = self.pe[:, :seq_len]
-        x = x + pe
-        return x
+        
+        return input + pe 
 
 class FFNN(nn.Module):
     def __init__(self,d_model,d_hidden,dropout):
@@ -47,8 +46,8 @@ class FFNN(nn.Module):
         self.drop = nn.Dropout(self.dropout) 
 
         nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self,input):
@@ -235,41 +234,39 @@ class TransformerEncoderDecoder(nn.Module):
 #If you want to use the full architecture use 
 #TransformerEncoderDecoder class in self.transform_blocks 
 class TransformerModel(nn.Module):
-    def __init__(self,d_model, num_layer,num_blocks, d_hidden,num_heads,max_token_value,context_length,vocab_size, drop=0.1,bias=True):
+    def __init__(self,d_model, num_layer, d_hidden,num_heads,vocab_size,context_length, drop=0.1):
         super().__init__()
         self.num_layer = num_layer 
         self.d_model = d_model 
         self.num_heads = num_heads 
-        self.num_blocks = num_blocks
         self.d_hidden = d_hidden 
-        self.max_token_value = max_token_value 
         self.vocab_size = vocab_size
-        self.context_lenght = context_length 
-
-
+        self.context_length = context_length 
         self.drop = drop
 
-        self.token_embedding = Embedding(num_embeddings = self.max_token_value + 1 , embedding_dim = self.d_model)
-        self.positional_encoding = PositionalEncoding(seq_len = self.context_length,emb_dim = self.d_model )
-        self.transformer_blocks = nn.Sequential(*([DecoderLayer(num_layer = self.num_layer,d_model=self.d_model, d_hidden=self.d_hidden,num_heads= self.num_heads, drop=0.1,bias=True) for _ in range(self.num_blocks)]))
+        self.token_embedding = Embedding(self.vocab_size ,self.d_model)
+        self.positional_encoding = PositionalEncoding(context_length, self.d_model )
+        self.blocks = nn.ModuleList([DecoderLayer(self.d_model, self.num_heads, self.d_hidden, self.drop) for _ in range(num_layer)])
 
-
-        self.linear_classifier_layer = nn.Linear(in_features=self.d_model, out_features=self.max_token_value)
+        self.LN = nn.LayerNorm(self.d_model)
+        self.linear_classifier_layer = nn.Linear(in_features=self.d_model, out_features=self.vocab_size)
 
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-      
-        x = self.token_embedding(idx)
+        assert T <= self.context_length
+        x = self.token_embedding(idx) * math.sqrt(self.d_model)
         x = self.positional_encoding(x)
-        x = self.transformer_blocks(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.LN(x)
         logits = self.linear_classifier_layer(x)
 
+        loss = None
         if targets is not None:
-            B, T, C = logits.shape
-            loss = F.cross_entropy(input=logits.view(B * T, C), target=targets.view(B * T))
-        else:
-            loss = None
+            loss = F.cross_entropy(logits.view(-1, self.vocab_size),
+                                   targets.view(-1))
+
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
@@ -280,3 +277,8 @@ class TransformerModel(nn.Module):
             idx_next = torch.multinomial(input=probs, num_samples=1)
             idx = torch.cat([idx, idx_next], dim=1)
         return idx
+    
+
+
+
+
