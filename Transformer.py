@@ -20,23 +20,24 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 TORCH_SEED = 1337
 torch.manual_seed(TORCH_SEED)
 
+os.makedirs("data", exist_ok=True)
 if not os.path.exists('data/sales_textbook.txt'):
     url = 'https://huggingface.co/datasets/goendalf666/sales-textbook_for_convincing_and_selling/raw/main/sales_textbook.txt'
-    with open('data/sales_textbook.txt', 'w') as f:
+    with open('data/sales_textbook.txt', 'w', encoding='utf-8') as f:
         f.write(requests.get(url).text)
 
 with open('data/sales_textbook.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-encoding = tiktoken.get_encoding("cl100k_base") #same tokenizer as gpt-4 
-tokenized_text = encoding.encode(text)
-max_token_value = max(tokenized_text) + 1  # the maximum value of the tokenized numbers
-tokenized_text = torch.tensor(tokenized_text, dtype=torch.long, device=device)  # put tokenized text into tensor
+encoding = tiktoken.get_encoding("cl100k_base")  # tokenizer GPT-4-like
+tokenized = encoding.encode(text)
+vocab_size = max(tokenized) + 1                  # compact vocab for this corpus
+tokenized = torch.tensor(tokenized, dtype=torch.long, device=device)
 
-# Split train and validation
-split_idx = int(len(tokenized_text) * 0.9)
-train_data = tokenized_text[:split_idx]
-val_data = tokenized_text[split_idx:]
+# train/val split
+split_idx = int(len(tokenized) * 0.9)
+train_data = tokenized[:split_idx]
+val_data   = tokenized[split_idx:]
 
 class Embedding(nn.Module):
     def __init__(self,vocab_size, emb_dim):
@@ -313,44 +314,38 @@ class TransformerModel(nn.Module):
 
 
 
-model = TransformerModel()
-model = model.to(device)
+model = TransformerModel(d_model=d_model,num_layer=num_blocks,d_hidden=4*d_model,num_heads=num_heads,vocab_size=vocab_size,context_length=context_length,drop=dropout).to(device)
 
-
-# Get input embedding batch
 def get_batch(split: str):
     data = train_data if split == 'train' else val_data
     idxs = torch.randint(low=0, high=len(data) - context_length, size=(batch_size,))
-    x = torch.stack([data[idx:idx + context_length] for idx in idxs]).to(device)
-    y = torch.stack([data[idx + 1:idx + context_length + 1] for idx in idxs]).to(device)
+    x = torch.stack([data[i:i + context_length] for i in idxs]).to(device)
+    y = torch.stack([data[i + 1:i + context_length + 1] for i in idxs]).to(device)
     return x, y
 
 
-# Calculate loss
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'valid']:
-        losses = torch.zeros(eval_iters)
+        losses = torch.zeros(eval_iters, device=device)
         for k in range(eval_iters):
-            x_batch, y_batch = get_batch(split)
-            logits, loss = model(x_batch, y_batch)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+            xb, yb = get_batch(split)
+            _, loss = model(xb, yb)
+            losses[k] = loss
+        out[split] = losses.mean().item()
     model.train()
     return out
 
 
-# Use AdamW optimizer
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=learning_rate)
-tracked_losses = list()
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for step in range(max_iters):
-    if step % eval_iters == 0 or step == max_iters - 1:
+    if step % eval_interval == 0 or step == max_iters - 1:
         losses = estimate_loss()
-        tracked_losses.append(losses)
-        print('Step:', step, 'Training Loss:', round(losses['train'].item(), 3), 'Validation Loss:',
-              round(losses['valid'].item(), 3))
+        print(f"Step {step:4d} / train {losses['train']:.3f} / valid {losses['valid']:.3f}")
 
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
@@ -358,16 +353,15 @@ for step in range(max_iters):
     loss.backward()
     optimizer.step()
 
-# Save the model state dictionary
+
 torch.save(model.state_dict(), 'model-ckpt.pt')
 
-# Generate
-model.eval()
-start = 'The salesperson'
-start_ids = encoding.encode(start)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-y = model.generate(x, max_new_tokens=100)
-print('---------------')
-print(encoding.decode(y[0].tolist()))
-print('---------------')
 
+model.eval()
+start = "The salesperson"
+start_ids = encoding.encode(start)
+x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]  
+y = model.generate(x, max_new_tokens=100)
+print("---------------")
+print(encoding.decode(y[0].tolist()))
+print("---------------")
